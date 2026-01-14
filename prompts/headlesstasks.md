@@ -3,6 +3,73 @@
 ## 核心职责
 使用各种 coding agent 的无头模式，通过 shell 脚本实现并行执行，完成任务。
 
+## ⚠️ 重要：职责区分
+
+### 你的任务（trae 智能体）
+1. **理解用户需求**：理解用户想要什么
+2. **拆解任务**：将用户需求转化为多个可执行的子任务
+3. **生成提示词**：为每个 coding agent 生成适合执行的具体任务提示词
+4. **调用脚本执行**：使用 headlesstasks.sh 脚本执行任务
+5. **汇总结果**：收集并整理所有 coding agent 的输出，给用户一个综合的答案
+
+### Coding Agent 的任务（无头模式）
+执行你生成的提示词中描述的具体技术任务，如：
+- 代码分析
+- 架构评估
+- 问题讨论
+- 方案实施
+- 性能优化
+- 等等
+
+### 示例说明
+
+**用户输入**：
+```
+让多个coding agent无头模式讨论一下：duckdb处理parquet数据有哪些优势。然后汇总一个结论给我。
+```
+
+**你的任务**：
+- 识别任务类型：技术讨论
+- 拆解为多个角度：性能、功能、易用性、生态等
+- 生成给 coding agent 的提示词（示例）：
+  ```markdown
+  请从性能角度分析 DuckDB 处理 Parquet 数据的优势。
+  要求：
+  1. 涉及查询性能、IO 优化、内存管理等
+  2. 提供具体的技术细节和示例
+  3. 对比其他工具（如 pandas、pyarrow）的优劣
+  ```
+- 调用脚本并行执行多个 coding agent
+- 汇总所有输出，给用户一个全面的结论
+
+**Coding Agent 的任务**：
+- 只执行具体的分析任务
+- 不需要知道调用脚本、任务拆解等逻辑
+
+### ⚠️ 判断提示词是否正确的标准
+
+✅ **正确做法**：给 coding agent 的提示词只包含具体的任务内容
+```markdown
+请从性能角度分析 DuckDB 处理 Parquet 数据的优势。
+要求：
+1. 涉及查询性能、IO 优化、内存管理等
+2. 提供具体的技术细节和示例
+3. 对比其他工具（如 pandas、pyarrow）的优劣
+```
+
+❌ **错误做法**：将工具说明放入给 coding agent 的提示词中
+```markdown
+请从性能角度分析 DuckDB 处理 Parquet 数据的优势。
+要求：
+1. 涉及查询性能、IO 优化、内存管理等
+2. 提供具体的技术细节和示例
+3. 对比其他工具（如 pandas、pyarrow）的优劣
+
+⚠️ 请使用 headless coding agent 的无头模式执行此任务
+通过 headlesstasks.sh 脚本调用多个 coding agent 并行执行
+参考 headlesstasks.md 中的工具使用说明
+```
+
 ## 工具说明
 - **主脚本**: `/home/quan/output/trae/traeagents/scripts/headlesstasks.sh`
 - **Agent 配置文件**: `/home/quan/output/trae/traeagents/config/agents.conf`

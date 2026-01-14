@@ -49,7 +49,7 @@ load_agents_config() {
         [[ "$key" =~ ^# ]] && continue
         [[ -z "$key" ]] && continue
         
-        if [[ "$key" =~ ^AGENT_([0-9]+)_(NAME|COMMAND|ARGS)$ ]]; then
+        if [[ "$key" =~ ^AGENT_([0-9]+)_(NAME|COMMAND|ARGS|PROMPT_ARGS)$ ]]; then
             local agent_num="${BASH_REMATCH[1]}"
             local prop="${BASH_REMATCH[2]}"
             AGENTS_CONFIG["${agent_num}_${prop}"]="$value"
@@ -57,7 +57,7 @@ load_agents_config() {
         fi
     done < "$AGENTS_CONFIG_PATH"
 
-    log_info "已加载 $((agent_count / 3)) 个 agent 配置"
+    log_info "已加载 $((agent_count / 4)) 个 agent 配置"
 }
 
 # 获取 agent 配置
@@ -69,12 +69,17 @@ get_agent_config() {
         local config_name="AGENTS_CONFIG[${agent_num}_NAME]"
         if [ "${!config_name}" == "$agent_name" ]; then
             local config_prop="AGENTS_CONFIG[${agent_num}_${prop}]"
-            echo "${!config_prop}"
-            return 0
+            # 检查配置项是否存在（即使为空）
+            if [ -v "${config_prop}" ]; then
+                echo "${!config_prop}"
+                return 0  # 配置项存在
+            else
+                return 1  # 配置项不存在
+            fi
         fi
     done
 
-    return 1
+    return 1  # agent 不存在
 }
 
 # 列出所有已配置的 agents
@@ -86,10 +91,18 @@ list_agents() {
         
         local cmd_key="AGENTS_CONFIG[${agent_num}_COMMAND]"
         local args_key="AGENTS_CONFIG[${agent_num}_ARGS]"
+        local prompt_args_key="AGENTS_CONFIG[${agent_num}_PROMPT_ARGS]"
         
         echo "  Agent $agent_num: $name"
         echo "    Command: ${!cmd_key}"
         echo "    Args: ${!args_key}"
+        
+        # 显示 PROMPT_ARGS，如果未配置则显示默认值
+        if [ -v "${prompt_args_key}" ]; then
+            echo "    Prompt Args: ${!prompt_args_key}"
+        else
+            echo "    Prompt Args: -p (default)"
+        fi
     done
 }
 
@@ -149,17 +162,48 @@ run_agent() {
     
     log_info "启动 $agent_name..."
     
-    local agent_command=$(get_agent_config "$agent_name" "COMMAND")
-    local agent_args=$(get_agent_config "$agent_name" "ARGS")
+local agent_command=$(get_agent_config "$agent_name" "COMMAND")
     
     if [ -z "$agent_command" ]; then
         log_error "未找到 agent 配置: $agent_name"
         return 1
     fi
     
-    local full_args="$agent_args $extra_args"
+    # 检查 ARGS 是否配置
+    if get_agent_config "$agent_name" "ARGS" >/dev/null 2>&1; then
+        # 配置项存在，获取其值（可能为空）
+        local agent_args=$(get_agent_config "$agent_name" "ARGS")
+    else
+        # 配置项不存在，使用空值
+        local agent_args=""
+    fi
     
-    $agent_command -p "$(cat "$prompt_file")" $full_args > "$output_file" 2>&1
+    # 检查 PROMPT_ARGS 是否配置
+    if get_agent_config "$agent_name" "PROMPT_ARGS" >/dev/null 2>&1; then
+        # 配置项存在，获取其值（可能为空）
+        local agent_prompt_args=$(get_agent_config "$agent_name" "PROMPT_ARGS")
+    else
+        # 配置项不存在，使用默认值 -p
+        local agent_prompt_args="-p"
+    fi
+    
+    # 构建 full_args，避免不必要的空格
+    if [ -n "$agent_args" ] && [ -n "$extra_args" ]; then
+        local full_args="$agent_args $extra_args"
+    elif [ -n "$agent_args" ]; then
+        local full_args="$agent_args"
+    elif [ -n "$extra_args" ]; then
+        local full_args="$extra_args"
+    else
+        local full_args=""
+    fi
+    
+    # 构建命令，如果 agent_prompt_args 不为空则添加
+    if [ -n "$agent_prompt_args" ]; then
+        $agent_command $agent_prompt_args "$(cat "$prompt_file")" $full_args > "$output_file" 2>&1
+    else
+        $agent_command "$(cat "$prompt_file")" $full_args > "$output_file" 2>&1
+    fi
     
     if [ -s "$output_file" ]; then
         log_success "$agent_name 执行完成: $output_file"
@@ -170,16 +214,100 @@ run_agent() {
     fi
 }
 
+# 监控 agent 健康状态并自动重启
+check_agents_health() {
+    local max_retries=3
+    local check_interval=10
+    
+    while true; do
+        local all_done=true
+        
+        for i in "${!pids[@]}"; do
+            local pid=${pids[$i]}
+            local agent=${agents[$i]}
+            local output=${outputs[$i]}
+            local prompt=${prompts[$i]}
+            local retry_count=${retries[$i]:-0}
+            
+            if [ -z "$pid" ] || [ "$pid" == "-1" ]; then
+                continue
+            fi
+            
+            if kill -0 $pid 2>/dev/null; then
+                all_done=false
+            else
+                if [ ! -s "$output" ] && [ $retry_count -lt $max_retries ]; then
+                    log_warning "$agent 输出为空或异常，准备重启 (重试 $((retry_count + 1))/$max_retries)..."
+                    
+                    local agent_command=$(get_agent_config "$agent" "COMMAND")
+                    local args=${agent_extra_args[$i]:-""}
+                    
+                    # 检查 ARGS 是否配置
+                    if get_agent_config "$agent" "ARGS" >/dev/null 2>&1; then
+                        # 配置项存在，获取其值（可能为空）
+                        local agent_args=$(get_agent_config "$agent" "ARGS")
+                    else
+                        # 配置项不存在，使用空值
+                        local agent_args=""
+                    fi
+                    
+                    # 检查 PROMPT_ARGS 是否配置
+                    if get_agent_config "$agent" "PROMPT_ARGS" >/dev/null 2>&1; then
+                        # 配置项存在，获取其值（可能为空）
+                        local agent_prompt_args=$(get_agent_config "$agent" "PROMPT_ARGS")
+                    else
+                        # 配置项不存在，使用默认值 -p
+                        local agent_prompt_args="-p"
+                    fi
+                    
+                    # 构建 full_args，避免不必要的空格
+                    if [ -n "$agent_args" ] && [ -n "$args" ]; then
+                        local full_args="$agent_args $args"
+                    elif [ -n "$agent_args" ]; then
+                        local full_args="$agent_args"
+                    elif [ -n "$args" ]; then
+                        local full_args="$args"
+                    else
+                        local full_args=""
+                    fi
+                    
+                    # 构建命令，如果 agent_prompt_args 不为空则添加
+                    if [ -n "$agent_prompt_args" ]; then
+                        $agent_command $agent_prompt_args "$(cat "$prompt")" $full_args > "$output" 2>&1 &
+                    else
+                        $agent_command "$(cat "$prompt")" $full_args > "$output" 2>&1 &
+                    fi
+                    local new_pid=$!
+                    
+                    pids[$i]=$new_pid
+                    retries[$i]=$((retry_count + 1))
+                    
+                    log_info "$agent 已重启 (PID: $new_pid)"
+                    all_done=false
+                fi
+            fi
+        done
+        
+        if [ "$all_done" = true ]; then
+            break
+        fi
+        
+        sleep $check_interval
+    done
+}
+
 # 并行执行多个 agents
 run_parallel() {
     local agents_json="$1"
     
     log_info "启动并行执行..."
     
-    local pids=()
-    local outputs=()
-    local agents=()
-    local prompts=()
+    declare -a pids
+    declare -a outputs
+    declare -a agents
+    declare -a prompts
+    declare -a retries
+    declare -a agent_extra_args
     
     while IFS='|' read -r agent prompt output args; do
         [ -z "$agent" ] && continue
@@ -190,37 +318,77 @@ run_parallel() {
         log_info "准备启动 $agent (prompt: $full_prompt, output: $full_output)"
         
         local agent_command=$(get_agent_config "$agent" "COMMAND")
-        local agent_args=$(get_agent_config "$agent" "ARGS")
         
         if [ -z "$agent_command" ]; then
             log_error "未找到 agent 配置: $agent"
             continue
         fi
         
-        local full_args="$agent_args $args"
+        # 检查 ARGS 是否配置
+        if get_agent_config "$agent" "ARGS" >/dev/null 2>&1; then
+            # 配置项存在，获取其值（可能为空）
+            local agent_args=$(get_agent_config "$agent" "ARGS")
+        else
+            # 配置项不存在，使用空值
+            local agent_args=""
+        fi
         
-        $agent_command -p "$(cat "$full_prompt")" $full_args > "$full_output" 2>&1 &
+        # 检查 PROMPT_ARGS 是否配置
+        if get_agent_config "$agent" "PROMPT_ARGS" >/dev/null 2>&1; then
+            # 配置项存在，获取其值（可能为空）
+            local agent_prompt_args=$(get_agent_config "$agent" "PROMPT_ARGS")
+        else
+            # 配置项不存在，使用默认值 -p
+            local agent_prompt_args="-p"
+        fi
+        
+        # 构建 full_args，避免不必要的空格
+        if [ -n "$agent_args" ] && [ -n "$args" ]; then
+            local full_args="$agent_args $args"
+        elif [ -n "$agent_args" ]; then
+            local full_args="$agent_args"
+        elif [ -n "$args" ]; then
+            local full_args="$args"
+        else
+            local full_args=""
+        fi
+        
+        # 构建命令，如果 agent_prompt_args 不为空则添加
+        if [ -n "$agent_prompt_args" ]; then
+            $agent_command $agent_prompt_args "$(cat "$full_prompt")" $full_args > "$full_output" 2>&1 &
+        else
+            $agent_command "$(cat "$full_prompt")" $full_args > "$full_output" 2>&1 &
+        fi
         
         pids+=($!)
         outputs+=("$full_output")
         agents+=("$agent")
         prompts+=("$full_prompt")
+        retries+=(0)
+        agent_extra_args+=("$args")
+        
+        log_info "$agent 已启动 (PID: ${pids[-1]})"
+        
+        sleep 3
     done <<< "$agents_json"
+    
+    log_info "启动监控进程，每10秒检查一次..."
+    check_agents_health &
+    local monitor_pid=$!
     
     log_info "等待所有进程完成..."
     for i in "${!pids[@]}"; do
-        wait ${pids[$i]} || log_warning "进程 ${agents[$i]} 退出异常"
+        wait ${pids[$i]} 2>/dev/null || log_warning "进程 ${agents[$i]} 退出"
     done
+    
+    kill $monitor_pid 2>/dev/null
     
     log_info "校验输出文件..."
     for i in "${!outputs[@]}"; do
         if [ ! -s "${outputs[$i]}" ]; then
-            log_warning "${agents[$i]} 输出为空，尝试串行重试..."
-            local agent_command=$(get_agent_config "${agents[$i]}" "COMMAND")
-            local agent_args=$(get_agent_config "${agents[$i]}" "ARGS")
-            local full_prompt="${prompts[$i]:-$SESSION_DIR/prompts/default.txt}"
-            
-            $agent_command -p "$(cat "$full_prompt")" $agent_args > "${outputs[$i]}" 2>&1
+            log_warning "${agents[$i]} 输出为空"
+        else
+            log_success "${agents[$i]} 执行完成"
         fi
     done
     
@@ -274,19 +442,35 @@ Agent 配置文件:
         AGENT_<编号>_NAME=<agent名称>
         AGENT_<编号>_COMMAND=<命令>
         AGENT_<编号>_ARGS=<参数>
+        AGENT_<编号>_PROMPT_ARGS=<提示词参数> (可选)
+    
+    PROMPT_ARGS 配置说明:
+        - 不配置此项: 使用默认值 -p
+        - 配置为空值: 不使用任何提示词参数 (如: AGENT_X_PROMPT_ARGS=)
+        - 配置具体值: 使用指定的参数 (如: AGENT_X_PROMPT_ARGS=--prompt)
     
     示例:
+        # 使用默认 -p 参数
         AGENT_1_NAME=qwen
         AGENT_1_COMMAND=qwen
         AGENT_1_ARGS=--approval-mode yolo --output-format stream-json
+        # AGENT_1_PROMPT_ARGS 未配置，将使用 -p
         
+        # 使用自定义参数
         AGENT_2_NAME=codebuddy
         AGENT_2_COMMAND=codebuddy
         AGENT_2_ARGS=-y --max-turns 200
+        AGENT_2_PROMPT_ARGS=--prompt
+        
+        # 不使用任何提示词参数
+        AGENT_3_NAME=claude-code
+        AGENT_3_COMMAND=ccr
+        AGENT_3_ARGS=-y
+        AGENT_3_PROMPT_ARGS=
     
     添加新 agent:
         1. 编辑 $AGENTS_CONFIG_PATH
-        2. 添加新的 AGENT_<编号>_NAME, AGENT_<编号>_COMMAND, AGENT_<编号>_ARGS
+        2. 添加新的 AGENT_<编号>_NAME, AGENT_<编号>_COMMAND, AGENT_<编号>_ARGS, AGENT_<编号>_PROMPT_ARGS
         3. 使用 list-agents 命令验证配置
     
 示例:
