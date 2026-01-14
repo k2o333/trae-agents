@@ -304,24 +304,53 @@ check_agents_health() {
 run_parallel() {
     local agents_json="$1"
     local start_delay=3  # 启动间隔（秒）
-    
+
     log_info "启动并行执行..."
-    
+
+    # 首先预处理 agents_json，显示有多少行
+    log_info "解析 AGENTS 配置..."
+    local agent_line_count=0
+    local temp_agents_json="$agents_json"
+
+    # 临时保存原始内容用于调试
+    echo "$agents_json" > /tmp/trae_agents_debug_$$
+    local total_lines=$(wc -l < /tmp/trae_agents_debug_$$ 2>/dev/null || echo "0")
+    log_info "检测到 $total_lines 行 AGENTS 配置"
+
     declare -a pids outputs agents prompts retries agent_extra_args
-    
+
     while IFS='|' read -r agent prompt output args; do
-        [ -z "$agent" ] && continue
-        
+        [ -z "$agent" ] && {
+            log_warning "跳过空行"
+            continue
+        }
+
+        agent_line_count=$((agent_line_count + 1))
+        log_info "处理第 $agent_line_count 行: agent='$agent', prompt='$prompt', output='$output', args='$args'"
+
         local full_output="${output:-$SESSION_DIR/outputs/${TASK_NAME}_${TIMESTAMP}_${agent}.json}"
         local full_prompt="${prompt:-$SESSION_DIR/prompts/default.txt}"
-        
+
+        # 验证 agent 配置
         if ! get_agent_config "$agent" "COMMAND" >/dev/null; then
-            log_error "未找到 agent 配置: $agent"
+            log_error "未找到 agent 配置: $agent (在第 $agent_line_count 行)"
             continue
         fi
-        
+
+        # 验证提示词文件是否存在
+        if [ ! -f "$full_prompt" ]; then
+            log_error "提示词文件不存在: $full_prompt (为 agent: $agent)"
+            continue
+        fi
+
+        # 验证提示词文件不为空
+        if [ ! -s "$full_prompt" ]; then
+            log_error "提示词文件为空: $full_prompt (为 agent: $agent)"
+            continue
+        fi
+
         log_info "准备启动 $agent (prompt: $full_prompt, output: $full_output)"
-        
+
         execute_agent_command "$agent" "$full_prompt" "$full_output" "$args" &
         pids+=($!)
         outputs+=("$full_output")
@@ -329,58 +358,100 @@ run_parallel() {
         prompts+=("$full_prompt")
         retries+=(0)
         agent_extra_args+=("$args")
-        
+
         log_info "$agent 已启动 (PID: ${pids[-1]})"
         sleep $start_delay
     done <<< "$agents_json"
-    
+
+    # 检查是否任何 agent 成功启动
+    if [ ${#agents[@]} -eq 0 ]; then
+        log_error "没有 agent 成功启动！请检查 AGENTS 配置格式"
+        log_info "提示：每个 AGENT 行应采用格式：agent_name|prompt_file|output_file|extra_args"
+        log_info "确保 prompt_file 和 output_file 路径正确"
+        rm -f /tmp/trae_agents_debug_$$ 2>/dev/null
+        return 1
+    fi
+
+    log_info "总共启动了 ${#agents[@]} 个 agent: ${agents[*]}"
+    rm -f /tmp/trae_agents_debug_$$ 2>/dev/null
+
     log_info "启动监控进程，每10秒检查一次..."
     check_agents_health &
     local monitor_pid=$!
-    
+
     log_info "等待所有进程完成..."
     for i in "${!pids[@]}"; do
         wait ${pids[$i]} 2>/dev/null || log_warning "进程 ${agents[$i]} 退出"
     done
-    
+
     kill $monitor_pid 2>/dev/null
-    
+
     log_info "校验输出文件..."
+    local success_count=0
+    local total_count=0
     for i in "${!outputs[@]}"; do
+        total_count=$((total_count + 1))
         if [ ! -s "${outputs[$i]}" ]; then
             log_warning "${agents[$i]} 输出为空"
         else
             log_success "${agents[$i]} 执行完成"
+            success_count=$((success_count + 1))
         fi
     done
-    
-    log_success "并行任务完成"
+
+    log_success "并行任务完成 ($success_count/$total_count 个 agent 成功)"
 }
 
 # 串行执行多个 agents
 run_sequential() {
     local agents_json="$1"
-    
+    local start_delay=3  # 启动间隔（秒）
+
     log_info "启动串行执行..."
-    
+
+    # 首先预处理 agents_json，显示有多少行
+    log_info "解析 AGENTS 配置..."
+    local agent_line_count=0
+
+    # 临时保存原始内容用于调试
+    echo "$agents_json" > /tmp/trae_agents_debug_$$
+    local total_lines=$(wc -l < /tmp/trae_agents_debug_$$ 2>/dev/null || echo "0")
+    log_info "检测到 $total_lines 行 AGENTS 配置"
+
+    declare -a pids outputs agents prompts retries agent_extra_args
+
     while IFS='|' read -r agent prompt output args; do
-        [ -z "$agent" ] && continue
-        
+        [ -z "$agent" ] && {
+            log_warning "跳过空行"
+            continue
+        }
+
+        agent_line_count=$((agent_line_count + 1))
+        log_info "处理第 $agent_line_count 行: agent='$agent', prompt='$prompt', output='$output', args='$args'"
+
         local full_output="${output:-$SESSION_DIR/outputs/${TASK_NAME}_${TIMESTAMP}_${agent}.json}"
         local full_prompt="${prompt:-$SESSION_DIR/prompts/default.txt}"
-        
+
+        # 验证 agent 配置
         if ! get_agent_config "$agent" "COMMAND" >/dev/null; then
-            log_error "未找到 agent 配置: $agent"
+            log_error "未找到 agent 配置: $agent (在第 $agent_line_count 行)"
             continue
         fi
-        
-        if ! validate_prompt_file "$full_prompt"; then
-            log_error "跳过 $agent：提示词文件无效"
+
+        # 验证提示词文件是否存在
+        if [ ! -f "$full_prompt" ]; then
+            log_error "提示词文件不存在: $full_prompt (为 agent: $agent)"
             continue
         fi
-        
+
+        # 验证提示词文件不为空
+        if [ ! -s "$full_prompt" ]; then
+            log_error "提示词文件为空: $full_prompt (为 agent: $agent)"
+            continue
+        fi
+
         log_info "准备启动 $agent (prompt: $full_prompt, output: $full_output)"
-        
+
         execute_agent_command "$agent" "$full_prompt" "$full_output" "$args" &
         pids+=($!)
         outputs+=("$full_output")
@@ -388,11 +459,23 @@ run_sequential() {
         prompts+=("$full_prompt")
         retries+=(0)
         agent_extra_args+=("$args")
-        
+
         log_info "$agent 已启动 (PID: ${pids[-1]})"
         sleep $start_delay
     done <<< "$agents_json"
-    
+
+    # 检查是否任何 agent 成功启动
+    if [ ${#agents[@]} -eq 0 ]; then
+        log_error "没有 agent 成功启动！请检查 AGENTS 配置格式"
+        log_info "提示：每个 AGENT 行应采用格式：agent_name|prompt_file|output_file|extra_args"
+        log_info "确保 prompt_file 和 output_file 路径正确"
+        rm -f /tmp/trae_agents_debug_$$ 2>/dev/null
+        return 1
+    fi
+
+    log_info "总共启动了 ${#agents[@]} 个 agent: ${agents[*]}"
+    rm -f /tmp/trae_agents_debug_$$ 2>/dev/null
+
     log_success "串行任务完成"
 }
 

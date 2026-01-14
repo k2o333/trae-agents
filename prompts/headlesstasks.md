@@ -138,6 +138,27 @@ $TRAE_ROOT/traeagents/scripts/headlesstasks.sh status
 - **Agent 命令执行失败**: 验证命令是否在 PATH 中
 - **输出文件为空**: 检查提示词内容是否有效
 - **并行执行失败**: 使用 `status` 命令查看会话状态
+- **Heredoc 结束标记问题**: 确保结束标记在单独一行，没有多余空格或字符
+- **提示词文件路径解析问题**: 确保使用 `<< AGENTS`（不带引号）让变量展开，或使用完整路径
+
+### 重要约束
+- **heredoc 结束标记**：必须在单独的一行，不能有前导或尾随空格
+    ```bash
+    # ✅ 正确
+    $TRAE_ROOT/traeagents/scripts/headlesstasks.sh run-parallel << AGENTS
+    qwen|$SESSION_DIR/prompts/task1.txt|$SESSION_DIR/outputs/qwen.json|
+    AGENTS
+
+    # ❌ 错误（结束标记前有空格）
+    $TRAE_ROOT/traeagents/scripts/headlesstasks.sh run-parallel << AGENTS
+    qwen|$SESSION_DIR/prompts/task1.txt|$SESSION_DIR/outputs/qwen.json|
+     AGENTS  # 这行开头有空格会导致错误
+
+    # ❌ 错误（结束标记后有字符）
+    $TRAE_ROOT/traeagents/scripts/headlesstasks.sh run-parallel << AGENTS
+    qwen|$SESSION_DIR/prompts/task1.txt|$SESSION_DIR/outputs/qwen.json|
+    AGENTS some_extra_text  # 结束标记后有额外文本
+    ```
 
 ### 调试命令
 ```bash
@@ -149,4 +170,9 @@ $TRAE_ROOT/traeagents/scripts/headlesstasks.sh status
 
 # 查看帮助
 $TRAE_ROOT/traeagents/scripts/headlesstasks.sh help
+
+# 验证提示词文件是否存在
+ls -la $SESSION_DIR/prompts/
+ls -la $SESSION_DIR/outputs/
 ```
+
